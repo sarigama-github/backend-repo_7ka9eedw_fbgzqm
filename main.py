@@ -214,6 +214,140 @@ def chat(payload: ChatPayload):
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)[:200]}")
 
 
+# ----------------------- Universal Ask (RAG over DB + optional AI) -----------------------
+class AskPayload(BaseModel):
+    question: str
+    top_k: int = 8
+
+
+@app.post("/api/ask")
+def ask_anything(payload: AskPayload):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    import re
+    q = payload.question.strip()
+    regex = {"$regex": re.escape(q), "$options": "i"}
+
+    # Search across multiple collections/fields
+    sources: List[Dict[str, Any]] = []
+
+    # Drugs
+    drug_hits = list(db["drug"].find({"$or": [
+        {"name": regex}, {"brand_names": regex}, {"class_name": regex},
+        {"indications": regex}, {"side_effects": regex}, {"mechanisms": regex}
+    ]}).limit(payload.top_k))
+    for d in drug_hits:
+        sources.append({
+            "collection": "drug",
+            "title": d.get("name"),
+            "snippet": ", ".join(filter(None, [d.get("class_name"), "; ".join(d.get("indications", []) or [])])) or d.get("mechanisms", ""),
+            "raw": {k: v for k, v in d.items() if k != "_id"}
+        })
+
+    # Interaction rules
+    inter_hits = list(db["interactionrule"].find({"$or": [
+        {"drug_a": regex}, {"drug_b": regex}, {"description": regex}, {"management": regex}
+    ]}).limit(payload.top_k))
+    for r in inter_hits:
+        title = f"{r.get('drug_a')} × {r.get('drug_b')} ({r.get('severity')})"
+        sources.append({
+            "collection": "interactionrule",
+            "title": title,
+            "snippet": r.get("description", ""),
+            "raw": {k: v for k, v in r.items() if k != "_id"}
+        })
+
+    # Quiz questions (as conceptual knowledge)
+    quiz_hits = list(db["quizquestion"].find({"$or": [
+        {"topic": regex}, {"question": regex}, {"explanation": regex}
+    ]}).limit(payload.top_k))
+    for qz in quiz_hits:
+        sources.append({
+            "collection": "quizquestion",
+            "title": qz.get("topic"),
+            "snippet": qz.get("question", ""),
+            "raw": {k: v for k, v in qz.items() if k != "_id"}
+        })
+
+    # Paper summaries
+    paper_hits = list(db["papersummary"].find({"$or": [
+        {"query": regex}, {"title": regex}, {"summary": regex}, {"abstract": regex}
+    ]}).limit(payload.top_k))
+    for ps in paper_hits:
+        sources.append({
+            "collection": "papersummary",
+            "title": ps.get("title") or ps.get("query"),
+            "snippet": ps.get("summary", "")[:400],
+            "raw": {k: v for k, v in ps.items() if k != "_id"}
+        })
+
+    # If nothing matched, try a broader partial regex on tokens
+    if not sources:
+        tokens = [t for t in re.split(r"\W+", q) if t]
+        ors = [{"$or": [
+            {"name": {"$regex": t, "$options": "i"}},
+            {"question": {"$regex": t, "$options": "i"}},
+            {"summary": {"$regex": t, "$options": "i"}},
+        ]} for t in tokens]
+        if ors:
+            fallback = list(db["drug"].find({"$and": ors}).limit(3))
+            for d in fallback:
+                sources.append({
+                    "collection": "drug",
+                    "title": d.get("name"),
+                    "snippet": d.get("mechanisms", ""),
+                    "raw": {k: v for k, v in d.items() if k != "_id"}
+                })
+
+    # Compose answer
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key and sources:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            # Build context text
+            context_lines = []
+            for s in sources[: payload.top_k]:
+                ctx = f"[{s['collection']}] {s['title']}: {s['snippet']}"
+                context_lines.append(ctx)
+            context = "\n".join(context_lines)
+            prompt = (
+                "You are a pharmacy tutor. Answer the user's question using the provided database context. "
+                "Prefer factual, concise, clinically-relevant information. If safety considerations or dosing are relevant, include them. "
+                "Cite brief source tags like [drug], [interactionrule], [papersummary] inline where appropriate. \n\n"
+                f"Question: {q}\n\nContext:\n{context}\n\nFinal answer:"
+            )
+            completion = client.chat.completions.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": "You provide accurate, concise pharmacy answers."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            reply = completion.choices[0].message.content
+            return {"answer": reply, "sources": sources, "configured": True}
+        except Exception as e:
+            # Fall through to non-AI answer
+            pass
+
+    # Non-AI fallback: assemble a concise synthesized answer from sources
+    if sources:
+        bullets = []
+        for s in sources[: min(5, len(sources))]:
+            title = s.get("title", "")
+            snippet = (s.get("snippet", "") or "").strip()
+            bullets.append(f"- {title}: {snippet}")
+        synthesized = (
+            "Here is what I found in the database:\n" + "\n".join(bullets) +
+            "\n\nFor a fuller AI-style explanation, add OPENAI_API_KEY to enable enhanced answers."
+        )
+        return {"answer": synthesized, "sources": sources, "configured": False}
+
+    return {"answer": "No relevant information found in the database for your question.", "sources": [], "configured": bool(os.getenv("OPENAI_API_KEY"))}
+
+
 # ----------------------- Quiz Generation -----------------------
 class QuizGenPayload(BaseModel):
     topic: str
