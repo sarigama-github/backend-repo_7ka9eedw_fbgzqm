@@ -1,48 +1,44 @@
 """
-Database Schemas
+Database Schemas for the Pharmacy EdTech App
 
-Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
-
-Each Pydantic model represents a collection in your database.
-Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+Each Pydantic model represents a MongoDB collection. The collection name is the
+lowercased class name (e.g., Drug -> "drug").
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
-# Example schemas (replace with your own):
+class Drug(BaseModel):
+    """Basic drug information"""
+    name: str = Field(..., description="Generic name of the drug")
+    brand_names: Optional[List[str]] = Field(default_factory=list, description="Brand names")
+    class_name: Optional[str] = Field(None, description="Pharmacological class")
+    indications: Optional[List[str]] = Field(default_factory=list, description="Common indications")
+    contraindications: Optional[List[str]] = Field(default_factory=list, description="Contraindications")
+    side_effects: Optional[List[str]] = Field(default_factory=list, description="Common side effects")
+    mechanisms: Optional[str] = Field(None, description="Mechanism of action")
 
-class User(BaseModel):
-    """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
-    """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+class InteractionRule(BaseModel):
+    """Drug-drug interaction rule"""
+    drug_a: str = Field(..., description="First drug (by generic name)")
+    drug_b: str = Field(..., description="Second drug (by generic name)")
+    severity: str = Field(..., description="none | minor | moderate | major | contraindicated")
+    description: str = Field(..., description="Description of the interaction and rationale")
+    management: Optional[str] = Field(None, description="Suggested management/monitoring")
 
-class Product(BaseModel):
-    """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
+class QuizQuestion(BaseModel):
+    """Quiz question document"""
+    topic: str = Field(..., description="Topic or chapter")
+    question: str = Field(..., description="Question text")
+    options: List[str] = Field(..., description="Multiple choice options")
+    answer_index: int = Field(..., ge=0, description="Index of correct option")
+    explanation: Optional[str] = Field(None, description="Why the answer is correct")
+    difficulty: Optional[str] = Field(None, description="easy | medium | hard")
 
-# Add your own schemas here:
-# --------------------------------------------------
-
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class PaperSummary(BaseModel):
+    """Stored literature summaries"""
+    query: str = Field(..., description="Original query")
+    title: str = Field(..., description="Paper title")
+    url: Optional[str] = Field(None, description="Link to paper")
+    abstract: Optional[str] = Field(None, description="Abstract text if available")
+    summary: Optional[str] = Field(None, description="AI generated summary")
